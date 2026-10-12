@@ -24,7 +24,9 @@ A theme installed from a git repo is held to a much shorter list; see [What an i
 3. If needed, generate `colors.toml` from `alacritty.toml`.
 4. Run `omarchy-theme-set-templates` to render templates into the staging
    theme.
-5. Move the staging theme into `~/.local/state/omarchy/current/theme`, write
+5. Exchange the staging theme with `~/.local/state/omarchy/current/theme` in
+   one rename (`mv --exchange`), so a current theme exists throughout and
+   Hyprland's config watch reloads into the new one, remove the old one, write
    `~/.local/state/omarchy/current/theme.name`, and notify the running shell.
 
 Template rendering only happens when the staged theme has `colors.toml`.
@@ -36,7 +38,7 @@ User templates in `~/.config/omarchy/themed/*.tpl` are processed before the
 built-in templates. If a user template has the same output filename as a
 built-in template, the built-in output is skipped.
 
-After activation, `omarchy-theme-set` retints what is on screen first: the terminals and the programs inside them (`visible_theme_commands`), plus the Hyprland reload when no background intro is playing (an intro reloads after playback). Those run in parallel and the command waits for them. The rest of the apps — GTK, the browser policy, editors, agents, the keyboard backlight (`other_theme_commands`) — then retint in parallel, followed by the `theme-set` hook (`~/.config/omarchy/hooks/theme-set*`, theme name in `$1`). During an intro they wait for its reveal first.
+After activation, `omarchy-theme-set` retints what is on screen first: the terminals and the programs inside them (`visible_theme_commands`), in parallel, and the command waits for them. Meanwhile, still holding its selection lock, it settles the Hyprland reload. Hyprland's config watch reloads by itself when the swap replaces the theme's `hyprland.lua`, and the switch records Hyprland's events from before the swap, so it runs `hyprctl reload` only when no reload follows the swap within 500ms. An intro settles it after playback instead. The rest of the apps — GTK, the browser policy, editors, agents, the keyboard backlight (`other_theme_commands`) — then retint in parallel, followed by the `theme-set` hook (`~/.config/omarchy/hooks/theme-set*`, theme name in `$1`). During an intro they wait for its reveal first.
 
 A switch from the theme picker, the menu or a script does not wait for that second group: the command returns and the group finishes in the background, writing its output to `~/.local/state/omarchy/theme-set.log` and naming any retint that failed in a notification. Run in a terminal, or with `OMARCHY_THEME_WAIT=1`, it waits for everything and reports failures on stderr, so a browser policy update can ask for a sudo password there. A systemd service or timer that sets the theme should set `OMARCHY_THEME_WAIT=1` as well: when a oneshot unit finishes, systemd stops whatever is left in its cgroup, and the background group with it. A failed retint never changes the exit status. Batches from quick successive switches run one at a time, and a batch whose theme was replaced before it got its turn skips the retints (its hook still runs), so an older theme's slow write can't land after a newer one. Making a new app follow theme changes means adding its restart/retint command to one of the two lists in `bin/omarchy-theme-set`. Runs serialize on a `flock`, so scripted theme changes queue instead of racing.
 

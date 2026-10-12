@@ -41,18 +41,32 @@ FAILED_THEME_COMMANDS=()
 # runs directly rather than through a login shell that rereads the profile.
 # A background command would otherwise get /dev/null as stdin, and the browser
 # policy asks for a sudo password on stdin when it is a terminal.
-run_parallel() {
-  local command index
-  local -a commands=("$@") pids=()
+PARALLEL_COMMANDS=()
+PARALLEL_PIDS=()
 
-  for command in "${commands[@]}"; do
+start_parallel() {
+  local command
+
+  for command in "$@"; do
     "$command" <&0 8>&- &
-    pids+=("$!")
+    PARALLEL_COMMANDS+=("$command")
+    PARALLEL_PIDS+=("$!")
   done
+}
 
-  for index in "${!pids[@]}"; do
-    wait "${pids[$index]}" || FAILED_THEME_COMMANDS+=("${commands[$index]}")
+wait_parallel() {
+  local index
+
+  for index in "${!PARALLEL_PIDS[@]}"; do
+    wait "${PARALLEL_PIDS[$index]}" || FAILED_THEME_COMMANDS+=("${PARALLEL_COMMANDS[$index]}")
   done
+  PARALLEL_COMMANDS=()
+  PARALLEL_PIDS=()
+}
+
+run_parallel() {
+  start_parallel "$@"
+  wait_parallel
 }
 
 # A retint that fails leaves one app on the old colours while the rest of the
@@ -68,6 +82,79 @@ report_failed_theme_commands() {
   if [[ $detached == "detached" ]]; then
     omarchy-notification-send -u normal "Theme not applied everywhere" \
       "${FAILED_THEME_COMMANDS[*]} failed. See $THEME_SET_LOG" >/dev/null 2>&1 || true
+  fi
+}
+
+# Hyprland watches the config files it loaded, the theme's hyprland.lua among
+# them, and reloads itself when the swap replaces that. Reloading again repeats
+# the work, a compositor stall of ~20ms in the middle of the transition. So the
+# switch records Hyprland's events from before the swap, and reloads only when
+# no reload has followed the swap: the watch is off (turned off by the user, or
+# paused by omarchy-hyprland-reload-guard around a package transaction), had
+# nothing to watch, or missed it.
+HYPRLAND_EVENTS=""
+HYPRLAND_LISTENER=""
+RELOADS_BEFORE_SWAP=""
+
+watch_hyprland_reloads() {
+  local socket="${XDG_RUNTIME_DIR:-/run/user/$UID}/hypr/${HYPRLAND_INSTANCE_SIGNATURE:-}/.socket2.sock"
+
+  [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} && -S $socket ]] || return 0
+  HYPRLAND_EVENTS=$(mktemp "${XDG_RUNTIME_DIR:-/tmp}/omarchy-theme-set-events.XXXXXX") || return 0
+  # socat opens the record once, so removing it later leaves nothing behind.
+  timeout 10 socat -u "UNIX-CONNECT:$socket" "OPEN:$HYPRLAND_EVENTS,append" </dev/null >/dev/null 2>&1 9>&- &
+  HYPRLAND_LISTENER=$!
+}
+
+count_hyprland_reloads() {
+  local event count=0
+
+  while IFS= read -r event; do
+    if [[ $event == configreloaded* ]]; then
+      count=$((count + 1))
+    fi
+  done <"$HYPRLAND_EVENTS"
+  REPLY=$count
+}
+
+# EPOCHREALTIME uses the locale's decimal separator, a comma in many, so only
+# its digits make the microsecond count.
+now_us() {
+  REPLY=${EPOCHREALTIME//[!0-9]/}
+}
+
+hyprland_reloaded_since_swap() {
+  local deadline
+
+  [[ -n $HYPRLAND_EVENTS && -n $RELOADS_BEFORE_SWAP ]] || return 1
+  [[ $(hyprctl -j getoption misc:disable_autoreload 2>/dev/null | jq -r '.bool' 2>/dev/null) == "false" ]] || return 1
+
+  # Hyprland reloads within a few tens of milliseconds of the swap. After an
+  # intro this runs long past that, and only reads what was recorded.
+  now_us
+  deadline=$((REPLY + 500000))
+  while true; do
+    count_hyprland_reloads
+    (( REPLY > RELOADS_BEFORE_SWAP )) && return 0
+    now_us
+    (( REPLY < deadline )) || return 1
+    sleep 0.01
+  done
+}
+
+reload_hyprland_unless_watched() {
+  if ! hyprland_reloaded_since_swap; then
+    omarchy-restart-hyprctl
+  fi
+}
+
+forget_hyprland_reloads() {
+  # After an intro the listener may be long gone and its pid reused.
+  if [[ -n $HYPRLAND_LISTENER && $(</proc/$HYPRLAND_LISTENER/comm) == "timeout" ]] 2>/dev/null; then
+    kill "$HYPRLAND_LISTENER" 2>/dev/null
+  fi
+  if [[ -n $HYPRLAND_EVENTS ]]; then
+    rm -f "$HYPRLAND_EVENTS"
   fi
 }
 
@@ -249,10 +336,11 @@ set_theme_background() {
       (
         flock 9
         if [[ $(stat -Lc '%d:%i' "$CURRENT_THEME_PATH" 2>/dev/null) == "$theme_id" ]]; then
-          omarchy-restart-hyprctl
+          reload_hyprland_unless_watched
         fi
       ) 9>"$THEME_SET_LOCK"
       [[ -z $OLD_BACKGROUND_SNAPSHOT ]] || rm -f "$OLD_BACKGROUND_SNAPSHOT"
+      forget_hyprland_reloads
     ) 9>&- &
     return
   fi
@@ -411,6 +499,12 @@ fi
 exec 9>"$THEME_SET_LOCK"
 flock 9
 
+# Listen for Hyprland's reloads from the start, so the socket is surely
+# connected by the time the swap makes Hyprland reload.
+if [[ $THEME_HEADLESS != "1" ]]; then
+  watch_hyprland_reloads
+fi
+
 # A current video frame only represents the screen after its opening fade.
 # Finish that short reveal before capturing the next outgoing cover.
 if [[ $THEME_HEADLESS != "1" && $OMARCHY_THEME_SKIP_BACKGROUND != "1" ]]; then
@@ -488,9 +582,22 @@ if [[ -n $THEME_BACKGROUND_INTRO ]]; then
   wait_for_theme_intro themeIntroCoverStatus "$(stat -Lc '%d:%i' "$NEXT_THEME_PATH")" "loading"
 fi
 
-# Swap next theme in as current
-rm -rf "$CURRENT_THEME_PATH"
-mv "$NEXT_THEME_PATH" "$CURRENT_THEME_PATH"
+# Swap next theme in as current. Exchanging the two directories in one rename
+# leaves no moment without a current theme: Hyprland's config watch reloads
+# when the old hyprland.lua goes, and a reload into a gap would skip the theme
+# and stop watching it. Without the exchange, that reload proves nothing.
+# Only reloads Hyprland reports after this count can have loaded the new theme.
+REPLY=""
+if [[ -n $HYPRLAND_EVENTS ]]; then
+  count_hyprland_reloads
+fi
+if [[ -d $CURRENT_THEME_PATH ]] && mv --exchange -T "$NEXT_THEME_PATH" "$CURRENT_THEME_PATH" 2>/dev/null; then
+  RELOADS_BEFORE_SWAP=$REPLY
+  rm -rf "$NEXT_THEME_PATH"
+else
+  rm -rf "$CURRENT_THEME_PATH"
+  mv "$NEXT_THEME_PATH" "$CURRENT_THEME_PATH"
+fi
 # Name this switch, so its deferred retints can tell when a later one replaced
 # the theme. A directory's inode would do, except that it can be reused.
 # A token that could not be written proves nothing either way, so then the
@@ -518,14 +625,9 @@ else
   set_theme_background
 fi
 
-# The shared staging/current symlinks are updated and the shell has accepted
-# the transition. Let another theme selection queue only behind that critical
-# section, not behind slower app-retint hooks and selector cache warmups.
-flock -u 9
-
 # What the user is looking at: the terminals and the programs drawn inside
-# them, plus the window borders when no intro is playing. These run as soon as
-# the theme is in place, alongside the wallpaper and bar transition.
+# them. These run as soon as the theme is in place, alongside the wallpaper
+# and bar transition.
 visible_theme_commands=(
   omarchy-restart-terminal
   omarchy-theme-set-foot
@@ -535,6 +637,25 @@ visible_theme_commands=(
   omarchy-restart-helix
   omarchy-theme-set-hunk
 )
+
+if [[ $THEME_HEADLESS != "1" ]]; then
+  start_parallel "${visible_theme_commands[@]}"
+fi
+
+# Settle the Hyprland reload while still holding the selection lock: a reload
+# this switch started must not reach the next switch's listener after that
+# one's swap, where it would pass for proof the newer theme loaded. The
+# terminals retint meanwhile. An intro settles it after playback, under the
+# same lock.
+if [[ $THEME_HEADLESS != "1" && -z $THEME_INTRO_TOKEN ]]; then
+  reload_hyprland_unless_watched || FAILED_THEME_COMMANDS+=(omarchy-restart-hyprctl)
+  forget_hyprland_reloads
+fi
+
+# The shared staging/current symlinks are updated and the shell has accepted
+# the transition. Let another theme selection queue only behind that critical
+# section, not behind slower app-retint hooks and selector cache warmups.
+flock -u 9
 
 # Configs other apps read on their next refresh or launch: GTK, the browser
 # policy, editors, agents and the keyboard backlight. Nothing on screen waits
@@ -607,12 +728,7 @@ apply_other_theme_commands() {
 }
 
 if [[ $THEME_HEADLESS != "1" ]]; then
-  # An intro reloads Hyprland after playback; ordinary theme changes reload it
-  # with the terminals.
-  if [[ -z $THEME_INTRO_TOKEN ]]; then
-    visible_theme_commands+=(omarchy-restart-hyprctl)
-  fi
-  run_parallel "${visible_theme_commands[@]}"
+  wait_parallel
 
   # A switch from the theme picker, the menu or a script returns once what is
   # on screen has changed and leaves the rest running behind it, with its
