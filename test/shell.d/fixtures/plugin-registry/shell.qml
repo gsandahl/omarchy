@@ -227,6 +227,22 @@ ShellRoot {
     root.assertEqual(registry.setBarWidget("third.widget", "size", 7, {}), "", "registry sets widget options")
     root.assertEqual(root.config.bar.layout.right[0].size, 7, "registry persists widget options")
 
+    // The tray section is a section of its own, in the tray's drawer.
+    root.assertEqual(registry.moveBarWidget("third.widget", { section: "tray" }), "", "registry moves widgets into the tray section")
+    root.assertDeepEqual(root.config.bar.layout.right, [], "a widget moved into the tray section leaves its section")
+    root.assertDeepEqual(root.config.bar.layout.tray, [{ id: "third.widget", size: 7 }], "the tray section keeps the widget's settings")
+    root.assertEqual(registry.setBarWidget("third.widget", "size", 9, {}), "", "registry finds widgets in the tray section")
+    root.assertEqual(root.config.bar.layout.tray[0].size, 9, "registry sets options on widgets in the tray section")
+    registry.setEnabled("third.widget", true)
+    root.assertDeepEqual(root.config.bar.layout.right, [], "enabling a widget in the tray section does not add it to the bar again")
+    root.assertEqual(registry.moveBarWidget("third.widget", { section: "right" }), "", "registry moves widgets out of the tray section")
+    root.assertDeepEqual(root.config.bar.layout.tray, [], "a widget moved out of the tray section leaves it")
+
+    root.config = { version: 1, bar: { layout: { left: [], center: [], right: [{ id: "omarchy.tray" }], tray: [{ id: "third.widget" }] } }, plugins: [] }
+    root.assertEqual(registry.moveBarWidget("omarchy.tray", { section: "tray" }), "the tray cannot go in its own drawer", "registry keeps the tray out of its own drawer")
+    root.assertEqual(registry.moveBarWidget("omarchy.tray", { after: "third.widget" }), "the tray cannot go in its own drawer", "registry keeps the tray out of its own drawer when placed beside a widget in it")
+    root.assertDeepEqual(root.config.bar.layout.right, [{ id: "omarchy.tray" }], "a refused tray move leaves the tray where it was")
+
     root.config = { version: 1, bar: { layout: { left: [], center: [], right: [] } }, plugins: [] }
     registry.setEnabled("third.widget", true, { section: "right", index: 0 })
     root.assertDeepEqual(root.config.bar.layout.right, [{ id: "third.widget" }], "enabling with placement is one registry transition")

@@ -72,7 +72,7 @@ QtObject {
     if (manifest.barWidget !== undefined && Util.isPlainObject(manifest.barWidget)
         && manifest.barWidget.defaultSection !== undefined) {
       var defaultSection = String(manifest.barWidget.defaultSection)
-      if (["left", "center", "right"].indexOf(defaultSection) === -1) {
+      if (["left", "center", "tray", "right"].indexOf(defaultSection) === -1) {
         console.warn("PluginRegistry: invalid barWidget.defaultSection at " + sourcePath)
         return null
       }
@@ -194,7 +194,7 @@ QtObject {
   function defaultBarWidgetSection(manifest) {
     var metadata = manifest && Util.isPlainObject(manifest.barWidget) ? manifest.barWidget : null
     var section = metadata ? String(metadata.defaultSection || "") : ""
-    return ["left", "center", "right"].indexOf(section) !== -1 ? section : "center"
+    return ["left", "center", "tray", "right"].indexOf(section) !== -1 ? section : "center"
   }
 
   function barEntryId(entry) {
@@ -205,7 +205,7 @@ QtObject {
     if (!Util.isPlainObject(config) || !Util.isPlainObject(config.bar)
         || !Util.isPlainObject(config.bar.layout)) return { found: false }
     var key = Util.canonicalWidgetId(String(id))
-    var sections = ["left", "center", "right"]
+    var sections = ["left", "center", "right", "tray"]
     for (var s = 0; s < sections.length; s++) {
       if (section && sections[s] !== section) continue
       var entries = config.bar.layout[sections[s]]
@@ -247,14 +247,18 @@ QtObject {
     return { found: false }
   }
 
-  function barTarget(config, placement, fallbackSection) {
+  // The tray section is drawn inside the tray, so the tray cannot go there.
+  function barTarget(config, placement, fallbackSection, id) {
     var target = placement || {}
-    var section = ["left", "center", "right"].indexOf(String(target.section || "")) !== -1
+    var section = ["left", "center", "right", "tray"].indexOf(String(target.section || "")) !== -1
       ? String(target.section) : fallbackSection
+    var trayError = { error: "the tray cannot go in its own drawer" }
+    if (id === "omarchy.tray" && section === "tray") return trayError
     var relativeId = String(target.before || target.after || "")
     if (relativeId) {
       var relative = findRelativeBarLocation(config, relativeId, section && target.section ? section : "")
       if (!relative.found) return { error: "could not find target widget " + relativeId }
+      if (id === "omarchy.tray" && relative.section === "tray") return trayError
       return {
         section: relative.section,
         index: relative.index + (target.after ? 1 : 0)
@@ -267,7 +271,9 @@ QtObject {
       return { section: section, index: Math.min(requested, config.bar.layout[section].length) }
     }
 
+    // The tray section has no anchor: a widget put there goes at its end.
     var anchors = { left: "omarchy.workspaces", center: "omarchy.weather", right: "omarchy.tray" }
+    if (!anchors[section]) return { section: section, index: config.bar.layout[section].length }
     var anchor = findRelativeBarLocation(config, anchors[section], section)
     return {
       section: section,
@@ -295,7 +301,7 @@ QtObject {
 
     var entry = config.bar.layout[source.section][source.index]
     config.bar.layout[source.section].splice(source.index, 1)
-    var target = barTarget(config, placement, source.section)
+    var target = barTarget(config, placement, source.section, key)
     if (target.error) {
       config.bar.layout[source.section].splice(source.index, 0, entry)
       return target.error
@@ -449,8 +455,9 @@ QtObject {
       var cloneLocation = findEntryLocation(config, cloneId)
       if (cloneLocation.kind === "bar") {
         var cloneEntry = config.bar.layout[cloneLocation.section][cloneLocation.index]
-        var sections = ["left", "center", "right"]
+        var sections = ["left", "center", "right", "tray"]
         for (var s = 0; s < sections.length; s++) {
+          if (!Array.isArray(config.bar.layout[sections[s]])) continue
           for (var i = config.bar.layout[sections[s]].length - 1; i >= 0; i--) {
             if (barEntryId(config.bar.layout[sections[s]][i]) === sourceId)
               config.bar.layout[sections[s]].splice(i, 1)
@@ -534,7 +541,8 @@ QtObject {
             config.bar.layout[sourceLocation.section][sourceLocation.index] = replacement
           } else {
             var section = defaultBarWidgetSection(manifest)
-            var target = barTarget(config, placement || {}, section)
+            var target = barTarget(config, placement || {}, section, key)
+            if (target.error) target = barTarget(config, {}, section === "tray" ? "right" : section, key)
             config.bar.layout[target.section].splice(target.index, 0, entry)
             insertedWithPlacement = true
           }
