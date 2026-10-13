@@ -33,13 +33,13 @@ BarWidget {
   // empty place it offers to drop the first one.
   property Item sectionHost: null
   property Item sectionDropSpace: null
-  readonly property int sectionCount: bar && typeof bar.layoutEntries === "function" ? bar.layoutEntries("tray").length : 0
+  readonly property int sectionCount: bar && bar.layoutConfig && Array.isArray(bar.layoutConfig.tray) ? bar.layoutConfig.tray.length : 0
   readonly property real sectionExtent: sectionHost ? (vertical ? sectionHost.implicitHeight : sectionHost.implicitWidth) : 0
   readonly property bool hasDrawer: allItems.length > 0 || sectionCount > 0 || barDragging
   readonly property int drawerExtent: drawerCount * trayItemExtent + Math.max(0, drawerCount - 1) * trayItemGap + sectionExtent
   // A widget being dragged along the bar opens the drawer, to show where it
   // can go, and so does any panel open from the tray or the tray section.
-  readonly property bool barDragging: !!bar && !!bar.barDragSource && bar.barDragSource.moduleName !== root.moduleName
+  readonly property bool barDragging: !!bar && bar.traySectionDragActive === true
   readonly property bool holdOpen: trayMenuOpen || managePopupOpen || barDragging || (!!bar && bar.traySectionPopoutOpen === true)
   // The mark under the bar sits under the icon whose menu is open.
   readonly property Item openPanelIndicatorItem: trayMenuOpen ? activeTrayAnchor : null
@@ -823,6 +823,16 @@ BarWidget {
     // the origin and the area takes the size of whichever is there.
     implicitWidth: childrenRect.width
     implicitHeight: childrenRect.height
+    // What the section's widgets take up. One hiding itself (an update badge
+    // with nothing to update) offers nowhere to drop, so that counts as empty.
+    readonly property real widgetsExtent: {
+      var size = 0
+      for (var i = 0; i < children.length; i++) {
+        var child = children[i]
+        if (child !== dropSpace && child.visible) size += root.vertical ? child.height : child.width
+      }
+      return size
+    }
 
     Component.onCompleted: {
       root.sectionHost = sectionArea
@@ -837,7 +847,7 @@ BarWidget {
       id: dropSpace
       readonly property string region: "tray"
       readonly property string moduleName: ""
-      visible: root.barDragging && root.sectionCount === 0
+      visible: root.barDragging && sectionArea.widgetsExtent === 0
       width: visible ? root.trayItemExtent : 0
       height: visible ? root.trayItemExtent : 0
 

@@ -100,6 +100,9 @@ Item {
   property var activePopout: null
   // An open panel from a widget in the tray section keeps the tray's drawer
   // open, so the panel's widget stays on screen under it.
+  // A widget is being dragged that could go into the tray section, so the
+  // tray's drawer opens to show where.
+  readonly property bool traySectionDragActive: !!barDragSource && !barDragSource.hostsTraySection
   readonly property bool traySectionPopoutOpen: {
     var owner = activePopout
     if (!owner) return false
@@ -158,6 +161,8 @@ Item {
     api.foregroundAnimationEnabled = Qt.binding(function() { return root.foregroundAnimationEnabled })
     api.centerSectionRevealHeld = Qt.binding(function() { return root.centerSectionRevealHeld })
     api._centerHoverRevealSuppressed = Qt.binding(function() { return root.centerHoverRevealSuppressed })
+    api.traySectionDragActive = Qt.binding(function() { return root.traySectionDragActive })
+    api.traySectionPopoutOpen = Qt.binding(function() { return root.traySectionPopoutOpen })
     root.syncPluginBarApiObjects(api)
   }
 
@@ -654,9 +659,7 @@ Item {
       left:   pinTrayToInner(normalized.left,   "left"),
       center: pinTrayToInner(normalized.center, "center"),
       right:  pinTrayToInner(normalized.right,  "right"),
-      // The tray section lives inside the tray's drawer, so it cannot hold
-      // the tray itself.
-      tray: normalized.tray.filter(function(entry) { return entryId(entry) !== "omarchy.tray" })
+      tray:   normalized.tray
     }
   }
 
@@ -1015,7 +1018,7 @@ Item {
     }
 
     // The tray cannot go into its own drawer.
-    var intoTraySection = !sourceSlot || sourceSlot.moduleName !== "omarchy.tray"
+    var intoTraySection = !sourceSlot || !sourceSlot.hostsTraySection
     var candidates = []
     for (var i = 0; i < moduleSlots.length; i++) {
       var slot = moduleSlots[i]
@@ -1993,11 +1996,16 @@ Item {
     readonly property real panelIndicatorCenter: {
       var mark = panelIndicatorItem
       if (!mark) return (root.vertical ? slot.height : slot.width) / 2
+      // A menu opened while the drawer is still sliding open moves with it;
+      // mapToItem alone would not re-run as the item moves.
+      var reveal = "revealProgress" in activeItem ? activeItem.revealProgress : 0
       var point = mark.mapToItem(slot, mark.width / 2, mark.height / 2)
       return root.vertical ? point.y : point.x
     }
     // The tray hosts the tray section in its drawer.
-    readonly property bool hostsTraySection: moduleName === "omarchy.tray" && !!activeItem && "sectionHost" in activeItem
+    // The tray, or a clone of it, hosts the tray section in its drawer; one
+    // inside the drawer does not, so the section never holds itself.
+    readonly property bool hostsTraySection: region !== "tray" && !!activeItem && "sectionHost" in activeItem
     readonly property Item sectionDropSpace: hostsTraySection ? activeItem.sectionDropSpace : null
 
     function traySectionContains(x, y) {
